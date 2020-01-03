@@ -93,14 +93,17 @@ data:
       } else {
         print GREEN."Disabled".RESET."  ";
       }
-      if ($table{$n}{VAR} < $ENV{MIN_VAR}) {
+      my $min_var = $ENV{MIN_VAR};
+      my $min_opt = $ENV{MIN_OPT};
+      $min_var = $min_opt = $min_var + $min_opt if ($table{$n}{VAR} == $table{$n}{OPT});
+      if ($table{$n}{VAR} < $min_var) {
         print RED;
         $fail++;
       } else {
         print GREEN;
       }
       printf "%-9s".RESET."  ", "$table{$n}{VAR}MB";
-      if ($table{$n}{OPT} < $ENV{MIN_OPT}) {
+      if ($table{$n}{OPT} < $min_opt) {
         print RED;
         $fail++;
       } else {
@@ -121,7 +124,8 @@ data:
     print "Kernel: >=$ENV{MIN_KERNEL} required\n";
     print "RAM: >=$ENV{MIN_RAM}MB recommended\n";
     print "Swap must be disabled\n";
-    print "/var must have $ENV{MIN_VAR}MB free\n \n";
+    print "/var must have $ENV{MIN_VAR}MB free\n";
+    print "/opt must have $ENV{MIN_OPT}MB free (unless on same filesystem as /var)\n \n";
     if ($fail) {
       print RED."Some checks above failed\n \n".RESET;
     } else {
