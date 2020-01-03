@@ -53,7 +53,7 @@ spec:
       hostNetwork: true
       containers:
         - name: nc
-          image: alpine:latest
+          image: alpine:3.10.3
           command:
           - /entrypoint.sh
           readinessProbe:

@@ -90,7 +90,7 @@ spec:
           type: Socket
       containers:
         - name: node
-          image: alpine:latest
+          image: alpine:3.10.3
           command:
           - /entrypoint.sh
           readinessProbe:

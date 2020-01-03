@@ -226,7 +226,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: preflight-job
-        image: alpine:latest
+        image: alpine:3.10.3
         command:
         - /entrypoint.sh
         volumeMounts:
