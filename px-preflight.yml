@@ -18,7 +18,6 @@ rules:
   - apiGroups: [""]
     resources:
       - pods
-      - nodes
     verbs:
       - get
       - list
@@ -163,3 +162,91 @@ spec:
           initialDelaySeconds: 1
           periodSeconds: 5
           timeoutSeconds: 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scripts
+  namespace: px-preflight
+data:
+  initdb.sh: |-
+    export PGUSER=postgres
+    export PGDATABASE=px-preflight
+    export PGHOST=postgres.px-preflight.svc
+    createdb -EUTF8
+    psql <<EOF
+    CREATE TABLE nodes (
+      id SERIAL PRIMARY KEY,
+      ip TEXT UNIQUE NOT NULL,
+      name TEXT UNIQUE NOT NULL,
+      skew INTEGER,
+      swap INTEGER,
+      cores INTEGER,
+      var_free INTEGER,
+      opt_free INTEGER,
+      kernel TEXT,
+      docker TEXT
+    );
+    CREATE TABLE etcd_nodes (
+      id SERIAL PRIMARY KEY,
+      ip TEXT NOT NULL,
+      port INTEGER NOT NULL
+    );
+    CREATE TABLE latency (
+      source_id UNIQUE NOT NULL REFERENCES nodes (id),
+      dest_id UNIQUE NOT NULL REFERENCES nodes (id),
+      time INTEGER NOT NULL
+    );
+    CREATE TABLE tcp (
+      source_id UNIQUE NOT NULL REFERENCES nodes (id),
+      dest_id UNIQUE NOT NULL REFERENCES nodes (id),
+      open BOOLEAN NOT NULL,
+      port INTEGER NOT NULL
+    );
+    CREATE TABLE udp (
+      source_id UNIQUE NOT NULL REFERENCES nodes (id),
+      dest_id UNIQUE NOT NULL REFERENCES nodes (id),
+      open BOOLEAN NOT NULL,
+      port INTEGER NOT NULL
+    );
+    CREATE TABLE etcd_conn (
+      node_id INTEGER NOT NULL REFERENCES nodes (id),
+      etcd_id INTEGER NOT NULL REFERENCES etcd_nodes (id),
+      open BOOLEAN NOT NULL
+    );
+    CREATE TABLE disks (
+      node_id INTEGER NOT NULL REFERENCES nodes (id),
+      file TEXT NOT NULL,
+      size INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX latency_idx ON latency (source_id, dest_id);
+    CREATE UNIQUE INDEX etcd_idx ON etcd (ip, port);
+    CREATE UNIQUE INDEX tcp_idx ON tcp (source_id, dest_id, port);
+    CREATE UNIQUE INDEX udp_idx ON udp (source_id, dest_id, port);
+    CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
+    EOF
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: initdb
+  namespace: px-preflight
+spec:
+  template:
+    metadata:
+      name: initdb
+      labels:
+        app: initdb
+    spec:
+      containers:
+      - image: "px-preflight"
+        name: initdb
+        command: [ "bin/sh", "-c", /initdb.sh" ]
+        volumeMounts:
+        - name: initdb
+          mountPath: /initdb.sh
+      volumes:
+      - name: initdb
+        configMap:
+          name: scripts
+      restartPolicy: OnFailure
