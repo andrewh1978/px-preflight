@@ -173,7 +173,10 @@ data:
     export PGUSER=postgres
     export PGDATABASE=px-preflight
     export PGHOST=postgres.px-preflight.svc
-    createdb -EUTF8
+    while ! createdb -EUTF8; do
+      echo waiting for postgresql
+      sleep 1
+    done
     psql <<EOF
     CREATE TABLE nodes (
       id SERIAL PRIMARY KEY,
@@ -184,8 +187,7 @@ data:
       cores INTEGER,
       var_free INTEGER,
       opt_free INTEGER,
-      kernel TEXT,
-      docker TEXT
+      kernel TEXT
     );
     CREATE TABLE etcd_nodes (
       id SERIAL PRIMARY KEY,
@@ -193,19 +195,19 @@ data:
       port INTEGER NOT NULL
     );
     CREATE TABLE latency (
-      source_id UNIQUE NOT NULL REFERENCES nodes (id),
-      dest_id UNIQUE NOT NULL REFERENCES nodes (id),
+      source_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
       time INTEGER NOT NULL
     );
     CREATE TABLE tcp (
-      source_id UNIQUE NOT NULL REFERENCES nodes (id),
-      dest_id UNIQUE NOT NULL REFERENCES nodes (id),
+      source_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
       open BOOLEAN NOT NULL,
       port INTEGER NOT NULL
     );
     CREATE TABLE udp (
-      source_id UNIQUE NOT NULL REFERENCES nodes (id),
-      dest_id UNIQUE NOT NULL REFERENCES nodes (id),
+      source_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
       open BOOLEAN NOT NULL,
       port INTEGER NOT NULL
     );
@@ -220,7 +222,7 @@ data:
       size INTEGER NOT NULL
     );
     CREATE UNIQUE INDEX latency_idx ON latency (source_id, dest_id);
-    CREATE UNIQUE INDEX etcd_idx ON etcd (ip, port);
+    CREATE UNIQUE INDEX etcd_idx ON etcd_nodes (ip, port);
     CREATE UNIQUE INDEX tcp_idx ON tcp (source_id, dest_id, port);
     CREATE UNIQUE INDEX udp_idx ON udp (source_id, dest_id, port);
     CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
@@ -239,12 +241,14 @@ spec:
         app: initdb
     spec:
       containers:
-      - image: "px-preflight"
-        name: initdb
-        command: [ "bin/sh", "-c", /initdb.sh" ]
+      - name: initdb
+        image: px-preflight
+        imagePullPolicy: "Never"
+        command: [ "/bin/sh", "/initdb.sh" ]
         volumeMounts:
         - name: initdb
           mountPath: /initdb.sh
+          subPath: initdb.sh
       volumes:
       - name: initdb
         configMap:
