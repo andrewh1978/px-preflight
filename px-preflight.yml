@@ -227,6 +227,8 @@ data:
     CREATE UNIQUE INDEX udp_idx ON udp (source_id, dest_id, port);
     CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
     EOF
+  px-preflight.sh: |-
+    sleep 30
 ---
 apiVersion: batch/v1
 kind: Job
@@ -254,3 +256,42 @@ spec:
         configMap:
           name: scripts
       restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: px-preflight
+  namespace: px-preflight
+spec:
+  completions: 3
+  parallelism: 3
+  template:
+    metadata:
+      name: px-preflight
+      labels:
+        app: px-preflight
+    spec:
+      containers:
+      - name: px-preflight
+        image: px-preflight
+        imagePullPolicy: "Never"
+        command: [ "/bin/sh", "/px-preflight.sh" ]
+        volumeMounts:
+        - name: px-preflight
+          mountPath: /px-preflight.sh
+          subPath: px-preflight.sh
+      volumes:
+      - name: px-preflight
+        configMap:
+          name: scripts
+      restartPolicy: Never
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: "app"
+                    operator: In
+                    values:
+                    - px-preflight
+              topologyKey: "kubernetes.io/hostname"
