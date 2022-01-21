@@ -118,57 +118,42 @@ spec:
       port: 5432
       targetPort: 5432
 ---
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: nginx
-  namespace: px-preflight
-spec:
-  selector:
-    matchLabels:
-      app: nginx
-  strategy:
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 1
-    type: RollingUpdate
-  replicas: 1
-  template:
-    metadata:
-      labels:
-        app: nginx
-    spec:
-      containers:
-      - name: nginx
-        image: px-preflight
-        imagePullPolicy: "Never"
-        ports:
-        - containerPort: 80
-        command:
-        - "nginx"
-        - "-g"
-        - "daemon off;"
-        readinessProbe:
-          httpGet:
-            port: 80
-            path: /index.html
-          initialDelaySeconds: 1
-          periodSeconds: 5
-          timeoutSeconds: 1
-        livenessProbe:
-          httpGet:
-            port: 80
-            path: /index.html
-          initialDelaySeconds: 1
-          periodSeconds: 5
-          timeoutSeconds: 1
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: scripts
+  name: files
   namespace: px-preflight
 data:
+  nginx-conf: |-
+    server {
+            listen 9001 default_server;
+            listen 9002 default_server;
+            listen 9003 default_server;
+            listen 9004 default_server;
+            listen 9005 default_server;
+            listen 9006 default_server;
+            listen 9007 default_server;
+            listen 9008 default_server;
+            listen 9009 default_server;
+            listen 9010 default_server;
+            listen 9011 default_server;
+            listen 9012 default_server;
+            listen 9013 default_server;
+            listen 9014 default_server;
+            listen 9015 default_server;
+            listen 9016 default_server;
+            listen 9017 default_server;
+            listen 9018 default_server;
+            listen 9019 default_server;
+            listen 9020 default_server;
+            listen 9021 default_server;
+            root /var/www/html;
+            index index.html index.htm index.nginx-debian.html;
+            server_name _;
+            location / {
+                    try_files $uri $uri/ =404;
+            }
+    }
   initdb.sh: |-
     export PGUSER=postgres
     export PGDATABASE=px-preflight
@@ -227,8 +212,70 @@ data:
     CREATE UNIQUE INDEX udp_idx ON udp (source_id, dest_id, port);
     CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
     EOF
-  px-preflight.sh: |-
-    sleep 30
+  one.sh: |-
+    export PGUSER=postgres
+    export PGDATABASE=px-preflight
+    export PGHOST=postgres.px-preflight.svc
+    psql -c 'SELECT count(*) from nodes' >&/dev/null || exit 1
+    ( echo "BEGIN;"
+      kubectl get nodes -lnode-role.kubernetes.io/master!="",px/enabled!=false -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
+      echo "COMMIT;"
+    ) | psql
+    # FIXME wait for completion, output to configmap, delete namespace
+  many.sh: |-
+    n=$(psql -c 'SELECT count(*) from nodes') 2>/dev/null || exit 1
+    [ $n = 0 ] && exit 1
+    # FIXME populate etcd_nodes
+    # FIXME test latency
+    # FIXME test tcp
+    # FIXME test udp
+    # FIXME test etcd if external
+    # FIXME list disks
+    # FIXME test cloud creds
+    sleep inf
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nginx
+  namespace: px-preflight
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      hostNetwork: true
+      containers:
+      - name: nginx
+        image: px-preflight
+        imagePullPolicy: "Never"
+        command: [ "nginx", "-g", "daemon off;" ]
+        volumeMounts:
+        - name: nginx-conf
+          mountPath: /etc/nginx/sites-available/default
+          subPath: nginx-conf
+        readinessProbe:
+          httpGet:
+            port: 9001
+            path: /index.html
+          initialDelaySeconds: 1
+          periodSeconds: 5
+          timeoutSeconds: 1
+        livenessProbe:
+          httpGet:
+            port: 9001
+            path: /index.html
+          initialDelaySeconds: 1
+          periodSeconds: 5
+          timeoutSeconds: 1
+      volumes:
+      - name: nginx-conf
+        configMap:
+          name: files
 ---
 apiVersion: batch/v1
 kind: Job
@@ -254,44 +301,78 @@ spec:
       volumes:
       - name: initdb
         configMap:
-          name: scripts
+          name: files
       restartPolicy: OnFailure
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: px-preflight
+  name: one
   namespace: px-preflight
 spec:
-  completions: 3
-  parallelism: 3
   template:
     metadata:
-      name: px-preflight
+      name: one
       labels:
-        app: px-preflight
+        app: one
     spec:
       containers:
-      - name: px-preflight
+      - name: one
         image: px-preflight
         imagePullPolicy: "Never"
-        command: [ "/bin/sh", "/px-preflight.sh" ]
+        command: [ "/bin/bash", "/one.sh" ]
         volumeMounts:
-        - name: px-preflight
-          mountPath: /px-preflight.sh
-          subPath: px-preflight.sh
+        - name: one
+          mountPath: /one.sh
+          subPath: one.sh
       volumes:
-      - name: px-preflight
+      - name: one
         configMap:
-          name: scripts
-      restartPolicy: Never
+          name: files
+      restartPolicy: OnFailure
+      serviceAccountName: px-preflight-sa
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: px-preflight
+  namespace: px-preflight
+  labels:
+    app: many
+spec:
+  selector:
+    matchLabels:
+      app: many
+  minReadySeconds: 0
+  template:
+    metadata:
+      labels:
+        app: many
+    spec:
       affinity:
-        podAntiAffinity:
+        nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - key: "app"
-                    operator: In
-                    values:
-                    - px-preflight
-              topologyKey: "kubernetes.io/hostname"
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: px/enabled
+                operator: NotIn
+                values:
+                - "false"
+              - key: node-role.kubernetes.io/master
+                operator: DoesNotExist
+      terminationGracePeriodSeconds: 0
+      volumes:
+      - name: many
+        configMap:
+          name: files
+      containers:
+        - name: many
+          image: px-preflight
+          imagePullPolicy: "Never"
+          command: [ "/bin/bash", "/many.sh" ]
+          volumeMounts:
+          - name: many
+            mountPath: /many.sh
+            readOnly: true
+            subPath: many.sh
+
