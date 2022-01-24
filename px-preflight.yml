@@ -113,10 +113,12 @@ metadata:
 spec:
   selector:
     app: postgres
+  type: NodePort
   ports:
     - protocol: TCP
       port: 5432
       targetPort: 5432
+      nodePort: 32432
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -157,11 +159,13 @@ data:
   initdb.sh: |-
     export PGUSER=postgres
     export PGDATABASE=px-preflight
-    export PGHOST=postgres.px-preflight.svc
-    while ! createdb -EUTF8; do
+    export PGHOST=127.0.0.1
+    export PGPORT=32432
+    while ! psql -c 'SELECT 1' postgres; do
       echo waiting for postgresql
       sleep 1
     done
+    createdb -EUTF8
     psql <<EOF
     CREATE TABLE nodes (
       id SERIAL PRIMARY KEY,
@@ -180,9 +184,9 @@ data:
       port INTEGER NOT NULL
     );
     CREATE TABLE latency (
-      source_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
-      dest_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
-      time INTEGER NOT NULL
+      source_id INTEGER NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER NOT NULL REFERENCES nodes (id),
+      time REAL NOT NULL
     );
     CREATE TABLE tcp (
       source_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
@@ -215,18 +219,39 @@ data:
   one.sh: |-
     export PGUSER=postgres
     export PGDATABASE=px-preflight
-    export PGHOST=postgres.px-preflight.svc
-    psql -c 'SELECT count(*) from nodes' >&/dev/null || exit 1
+    export PGHOST=127.0.0.1
+    export PGPORT=32432
+    while ! psql -c 'SELECT count(*) from nodes'; do
+      sleep 1
+    done
     ( echo "BEGIN;"
       kubectl get nodes -lnode-role.kubernetes.io/master!="",px/enabled!=false -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
       echo "COMMIT;"
     ) | psql
-    # FIXME wait for completion, output to configmap, delete namespace
+    # FIXME wait for completion, output to configmap
   many.sh: |-
-    n=$(psql -c 'SELECT count(*) from nodes') 2>/dev/null || exit 1
-    [ $n = 0 ] && exit 1
+    export PGUSER=postgres
+    export PGDATABASE=px-preflight
+    export PGHOST=127.0.0.1
+    export PGPORT=32432
+    ip=$(hostname -i)
+    while :; do
+      date
+      nodes=$(psql -t -c 'SELECT ip from nodes')
+      [ "$nodes" ] && break
+      sleep 1
+    done
+    # test latency
+    for i in $nodes; do
+      [ $ip = $i ] && continue
+      echo test from $ip to $i
+      latency=$(ping -qc 4 -w 5 $i | grep avg | cut -f 5 -d /)
+      echo found $latency
+      if [ $latency ]; then
+        psql -c "INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency)"
+      fi
+    done
     # FIXME populate etcd_nodes
-    # FIXME test latency
     # FIXME test tcp
     # FIXME test udp
     # FIXME test etcd if external
@@ -289,11 +314,12 @@ spec:
       labels:
         app: initdb
     spec:
+      hostNetwork: true
       containers:
       - name: initdb
         image: px-preflight
         imagePullPolicy: "Never"
-        command: [ "/bin/sh", "/initdb.sh" ]
+        command: [ "/bin/bash", "/initdb.sh" ]
         volumeMounts:
         - name: initdb
           mountPath: /initdb.sh
@@ -316,6 +342,7 @@ spec:
       labels:
         app: one
     spec:
+      hostNetwork: true
       containers:
       - name: one
         image: px-preflight
@@ -335,7 +362,7 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: px-preflight
+  name: many
   namespace: px-preflight
   labels:
     app: many
@@ -349,6 +376,7 @@ spec:
       labels:
         app: many
     spec:
+      hostNetwork: true
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
