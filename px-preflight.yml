@@ -123,6 +123,18 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: env
+  namespace: px-preflight
+data:
+  PGUSER: "postgres"
+  PGDATABASE: "px-preflight"
+  PGHOST: "127.0.0.1"
+  PGPORT: "32432"
+  PGCONNECT_TIMEOUT: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: files
   namespace: px-preflight
 data:
@@ -150,17 +162,13 @@ data:
             listen 9020 default_server;
             listen 9021 default_server;
             root /var/www/html;
-            index index.html index.htm index.nginx-debian.html;
+            index index.html;
             server_name _;
             location / {
                     try_files $uri $uri/ =404;
             }
     }
   initdb.sh: |-
-    export PGUSER=postgres
-    export PGDATABASE=px-preflight
-    export PGHOST=127.0.0.1
-    export PGPORT=32432
     while ! psql -c 'SELECT 1' postgres; do
       echo waiting for postgresql
       sleep 1
@@ -173,6 +181,7 @@ data:
       name TEXT UNIQUE NOT NULL,
       skew INTEGER,
       swap INTEGER,
+      memory INTEGER,
       cores INTEGER,
       var_free INTEGER,
       opt_free INTEGER,
@@ -217,10 +226,6 @@ data:
     CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
     EOF
   one.sh: |-
-    export PGUSER=postgres
-    export PGDATABASE=px-preflight
-    export PGHOST=127.0.0.1
-    export PGPORT=32432
     while ! psql -c 'SELECT count(*) from nodes'; do
       sleep 1
     done
@@ -230,13 +235,8 @@ data:
     ) | psql
     # FIXME wait for completion, output to configmap
   many.sh: |-
-    export PGUSER=postgres
-    export PGDATABASE=px-preflight
-    export PGHOST=127.0.0.1
-    export PGPORT=32432
     ip=$(hostname -i)
     while :; do
-      date
       nodes=$(psql -t -c 'SELECT ip from nodes')
       [ "$nodes" ] && break
       sleep 1
@@ -248,15 +248,33 @@ data:
       latency=$(ping -qc 4 -w 5 $i | grep avg | cut -f 5 -d /)
       echo found $latency
       if [ $latency ]; then
-        psql -c "INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency)"
+        sql="$sql INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency);"
       fi
     done
+    # get disks
+    lsblk -dnsb -o NAME,SIZE,TYPE,MOUNTPOINT | grep -v '`' | while read n s t m; do
+      [ $m ] && continue
+      s=$[$s/1073741824]
+      echo found $n on $ip size $s
+      [ $s -ge 8 ] && sql="$sql INSERT INTO disks (node_id, file, size) SELECT id, '$n', $s FROM nodes WHERE ip = '$ip';"
+    done
+    # get skew
+    t=$(curl -s --http0.9 time.nist.gov:13 | tail -1 | cut -f 2,3 -d " ")
+    [ "$t" ] && sql="$sql UPDATE nodes SET skew = '$[$(date +%s)-$(date +%s -d "20$t")]' WHERE ip = '$ip';"
+    # get kernel
+    sql="$sql UPDATE nodes SET kernel = '$(uname -r)' WHERE ip = '$ip';"
+    # get resources
+    sql="$sql UPDATE nodes SET swap = '$(tail +2 /proc/swaps | wc -l)' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET cores = '$(grep -c processor /proc/cpuinfo)' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET memory = '$(free -g | awk '/Mem/{print$2}')' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET opt_free = '$(df -m /host-opt | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET var_free = '$(df -m /host-var/lib | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
     # FIXME populate etcd_nodes
     # FIXME test tcp
     # FIXME test udp
     # FIXME test etcd if external
-    # FIXME list disks
     # FIXME test cloud creds
+    psql <<<$sql
     sleep inf
 ---
 apiVersion: apps/v1
@@ -324,11 +342,15 @@ spec:
         - name: initdb
           mountPath: /initdb.sh
           subPath: initdb.sh
+        envFrom:
+        - configMapRef:
+            name: env
       volumes:
       - name: initdb
         configMap:
           name: files
       restartPolicy: OnFailure
+
 ---
 apiVersion: batch/v1
 kind: Job
@@ -352,6 +374,9 @@ spec:
         - name: one
           mountPath: /one.sh
           subPath: one.sh
+        envFrom:
+        - configMapRef:
+            name: env
       volumes:
       - name: one
         configMap:
@@ -393,6 +418,14 @@ spec:
       - name: many
         configMap:
           name: files
+      - name: host-var
+        hostPath:
+          path: /var
+          type: Directory
+      - name: host-opt
+        hostPath:
+          path: /opt
+          type: Directory
       containers:
         - name: many
           image: px-preflight
@@ -403,4 +436,10 @@ spec:
             mountPath: /many.sh
             readOnly: true
             subPath: many.sh
-
+          - name: host-var
+            mountPath: /host-var
+          - name: host-opt
+            mountPath: /host-opt
+          envFrom:
+          - configMapRef:
+              name: env
