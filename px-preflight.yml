@@ -198,14 +198,14 @@ data:
       time REAL NOT NULL
     );
     CREATE TABLE tcp (
-      source_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
-      dest_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
+      source_id INTEGER NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER NOT NULL REFERENCES nodes (id),
       open BOOLEAN NOT NULL,
       port INTEGER NOT NULL
     );
     CREATE TABLE udp (
-      source_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
-      dest_id INTEGER UNIQUE NOT NULL REFERENCES nodes (id),
+      source_id INTEGER NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER NOT NULL REFERENCES nodes (id),
       open BOOLEAN NOT NULL,
       port INTEGER NOT NULL
     );
@@ -241,15 +241,16 @@ data:
       [ "$nodes" ] && break
       sleep 1
     done
+    # start udp listener
+    nc -uklp 9002 &
     # test latency
     for i in $nodes; do
       [ $ip = $i ] && continue
-      echo test from $ip to $i
+      echo ping from $ip to $i
       latency=$(ping -qc 4 -w 5 $i | grep avg | cut -f 5 -d /)
+      [ "$latency" ] || latency=-1
       echo found $latency
-      if [ $latency ]; then
-        sql="$sql INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency);"
-      fi
+      sql="$sql INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency);"
     done
     # get disks
     lsblk -dnsb -o NAME,SIZE,TYPE,MOUNTPOINT | grep -v '`' | while read n s t m; do
@@ -269,9 +270,18 @@ data:
     sql="$sql UPDATE nodes SET memory = '$(free -g | awk '/Mem/{print$2}')' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET opt_free = '$(df -m /host-opt | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET var_free = '$(df -m /host-var/lib | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
+    # test tcp/udp
+    for i in $nodes; do
+      [ $ip = $i ] && continue
+      nc -uzw 1 $i && open=t || open=f
+      sql="$sql INSERT INTO udp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), 9002, '$open');"
+      for port in $(seq 9001 9021); do
+        echo tcp from $ip to $i:$port
+        curl $ip:$port && open=t || open=f
+        sql="$sql INSERT INTO tcp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $port, '$open');"
+      done
+    done
     # FIXME populate etcd_nodes
-    # FIXME test tcp
-    # FIXME test udp
     # FIXME test etcd if external
     # FIXME test cloud creds
     psql <<<$sql
