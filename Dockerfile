@@ -9,4 +9,4 @@ RUN echo px-preflight >/var/www/html/index.html
 RUN apt-get -y install curl
 RUN curl -L -o /usr/bin/kubectl "https://dl.k8s.io/release/v1.23.1/bin/linux/amd64/kubectl"
 RUN chmod 755 /usr/bin/kubectl
-RUN apt-get -y install iputils-ping
+RUN apt-get -y install iputils-ping netcat
