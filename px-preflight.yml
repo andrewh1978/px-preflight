@@ -4,36 +4,25 @@ metadata:
   name: px-preflight
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: px-preflight
+data:
+  START_PORT: "9001"
+  END_PORT: "9021"
+  MIN_CORES: "4"
+  MIN_RAM: "7719"
+  MIN_VAR: "3072"
+  MIN_OPT: "3072"
+  MAX_PING: "10"
+  MAX_TIMESKEW: "5"
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: px-preflight-sa
   namespace: px-preflight
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: px-preflight-role
-  namespace: px-preflight
-rules:
-  - apiGroups: [""]
-    resources:
-      - pods
-    verbs:
-      - get
-      - list
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: px-preflight-rb
-  namespace: px-preflight
-subjects:
-  - kind: ServiceAccount
-    name: px-preflight-sa
-roleRef:
-  kind: Role
-  name: px-preflight-role
-  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -44,7 +33,6 @@ rules:
   resources:
   - nodes
   verbs:
-  - get
   - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -83,15 +71,10 @@ spec:
       containers:
       - name: postgres
         image: px-preflight
-        imagePullPolicy: "Never"
+        imagePullPolicy: "IfNotPresent"
         ports:
         - containerPort: 5432
-        command:
-        - "su"
-        - "-"
-        - "postgres"
-        - "-c"
-        - "/usr/lib/postgresql/12/bin/postgres -c config_file=/etc/postgresql/12/main/postgresql.conf -h '*'"
+        command: ["su", "-", "postgres", "-c", "/usr/lib/postgresql/12/bin/postgres -c config_file=/etc/postgresql/12/main/postgresql.conf -h '*'"]
         readinessProbe:
           exec:
             command: ["psql", "-U", "postgres", "-c", "SELECT 1"]
@@ -138,36 +121,6 @@ metadata:
   name: files
   namespace: px-preflight
 data:
-  nginx-conf: |-
-    server {
-            listen 9001 default_server;
-            listen 9002 default_server;
-            listen 9003 default_server;
-            listen 9004 default_server;
-            listen 9005 default_server;
-            listen 9006 default_server;
-            listen 9007 default_server;
-            listen 9008 default_server;
-            listen 9009 default_server;
-            listen 9010 default_server;
-            listen 9011 default_server;
-            listen 9012 default_server;
-            listen 9013 default_server;
-            listen 9014 default_server;
-            listen 9015 default_server;
-            listen 9016 default_server;
-            listen 9017 default_server;
-            listen 9018 default_server;
-            listen 9019 default_server;
-            listen 9020 default_server;
-            listen 9021 default_server;
-            root /var/www/html;
-            index index.html;
-            server_name _;
-            location / {
-                    try_files $uri $uri/ =404;
-            }
-    }
   initdb.sh: |-
     while ! psql -c 'SELECT 1' postgres; do
       echo waiting for postgresql
@@ -242,23 +195,25 @@ data:
       sleep 1
     done
     # start udp listener
-    nc -uklp 9002 &
+    nc -ukl $[$START_PORT+1] &
+    # start tcp listeners
+    for i in $(seq $START_PORT $END_PORT); do
+      nc -kl $i &
+    done
     # test latency
     for i in $nodes; do
       [ $ip = $i ] && continue
-      echo ping from $ip to $i
       latency=$(ping -qc 4 -w 5 $i | grep avg | cut -f 5 -d /)
       [ "$latency" ] || latency=-1
-      echo found $latency
       sql="$sql INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency);"
     done
     # get disks
-    lsblk -dnsb -o NAME,SIZE,TYPE,MOUNTPOINT | grep -v '`' | while read n s t m; do
+    disksql=$(lsblk -dnsb -o NAME,SIZE,TYPE,MOUNTPOINT | grep -v '`' | while read n s t m; do
       [ $m ] && continue
       s=$[$s/1073741824]
-      echo found $n on $ip size $s
-      [ $s -ge 8 ] && sql="$sql INSERT INTO disks (node_id, file, size) SELECT id, '$n', $s FROM nodes WHERE ip = '$ip';"
-    done
+      [ $s -ge 8 ] && echo "INSERT INTO disks (node_id, file, size) SELECT id, '$n', $s FROM nodes WHERE ip = '$ip';"
+    done)
+    sql="$sql $disksql"
     # get skew
     t=$(curl -s --http0.9 time.nist.gov:13 | tail -1 | cut -f 2,3 -d " ")
     [ "$t" ] && sql="$sql UPDATE nodes SET skew = '$[$(date +%s)-$(date +%s -d "20$t")]' WHERE ip = '$ip';"
@@ -267,17 +222,17 @@ data:
     # get resources
     sql="$sql UPDATE nodes SET swap = '$(tail +2 /proc/swaps | wc -l)' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET cores = '$(grep -c processor /proc/cpuinfo)' WHERE ip = '$ip';"
-    sql="$sql UPDATE nodes SET memory = '$(free -g | awk '/Mem/{print$2}')' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET memory = '$(free -m | awk '/Mem/{print$2}')' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET opt_free = '$(df -m /host-opt | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET var_free = '$(df -m /host-var/lib | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
     # test tcp/udp
     for i in $nodes; do
       [ $ip = $i ] && continue
-      nc -uzw 1 $i && open=t || open=f
-      sql="$sql INSERT INTO udp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), 9002, '$open');"
-      for port in $(seq 9001 9021); do
+      nc -uzw 1 $i $[$START_PORT+1] && open=t || open=f
+      sql="$sql INSERT INTO udp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $[$START_PORT+1], '$open');"
+      for port in $(seq $START_PORT $END_PORT); do
         echo tcp from $ip to $i:$port
-        curl $ip:$port && open=t || open=f
+        nc -zw 1 $ip $port && open=t || open=f
         sql="$sql INSERT INTO tcp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $port, '$open');"
       done
     done
@@ -286,49 +241,6 @@ data:
     # FIXME test cloud creds
     psql <<<$sql
     sleep inf
----
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: nginx
-  namespace: px-preflight
-spec:
-  selector:
-    matchLabels:
-      app: nginx
-  template:
-    metadata:
-      labels:
-        app: nginx
-    spec:
-      hostNetwork: true
-      containers:
-      - name: nginx
-        image: px-preflight
-        imagePullPolicy: "Never"
-        command: [ "nginx", "-g", "daemon off;" ]
-        volumeMounts:
-        - name: nginx-conf
-          mountPath: /etc/nginx/sites-available/default
-          subPath: nginx-conf
-        readinessProbe:
-          httpGet:
-            port: 9001
-            path: /index.html
-          initialDelaySeconds: 1
-          periodSeconds: 5
-          timeoutSeconds: 1
-        livenessProbe:
-          httpGet:
-            port: 9001
-            path: /index.html
-          initialDelaySeconds: 1
-          periodSeconds: 5
-          timeoutSeconds: 1
-      volumes:
-      - name: nginx-conf
-        configMap:
-          name: files
 ---
 apiVersion: batch/v1
 kind: Job
@@ -346,7 +258,7 @@ spec:
       containers:
       - name: initdb
         image: px-preflight
-        imagePullPolicy: "Never"
+        imagePullPolicy: "IfNotPresent"
         command: [ "/bin/bash", "/initdb.sh" ]
         volumeMounts:
         - name: initdb
@@ -360,7 +272,6 @@ spec:
         configMap:
           name: files
       restartPolicy: OnFailure
-
 ---
 apiVersion: batch/v1
 kind: Job
@@ -378,7 +289,7 @@ spec:
       containers:
       - name: one
         image: px-preflight
-        imagePullPolicy: "Never"
+        imagePullPolicy: "IfNotPresent"
         command: [ "/bin/bash", "/one.sh" ]
         volumeMounts:
         - name: one
@@ -421,8 +332,6 @@ spec:
                 operator: NotIn
                 values:
                 - "false"
-              - key: node-role.kubernetes.io/master
-                operator: DoesNotExist
       terminationGracePeriodSeconds: 0
       volumes:
       - name: many
@@ -439,7 +348,7 @@ spec:
       containers:
         - name: many
           image: px-preflight
-          imagePullPolicy: "Never"
+          imagePullPolicy: "IfNotPresent"
           command: [ "/bin/bash", "/many.sh" ]
           volumeMounts:
           - name: many
@@ -451,5 +360,7 @@ spec:
           - name: host-opt
             mountPath: /host-opt
           envFrom:
+          - configMapRef:
+              name: config
           - configMapRef:
               name: env
