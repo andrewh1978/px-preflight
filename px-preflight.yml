@@ -130,7 +130,7 @@ data:
     psql <<EOF
     CREATE TABLE nodes (
       id SERIAL PRIMARY KEY,
-      ip TEXT UNIQUE NOT NULL,
+      ip INET UNIQUE NOT NULL,
       name TEXT UNIQUE NOT NULL,
       skew INTEGER,
       swap INTEGER,
@@ -138,7 +138,8 @@ data:
       cores INTEGER,
       var_free INTEGER,
       opt_free INTEGER,
-      kernel TEXT
+      kernel TEXT,
+      complete BOOLEAN DEFAULT 'f'
     );
     CREATE TABLE etcd_nodes (
       id SERIAL PRIMARY KEY,
@@ -179,14 +180,24 @@ data:
     CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
     EOF
   one.sh: |-
+    # check database is up
     while ! psql -c 'SELECT count(*) from nodes'; do
       sleep 1
     done
+    # populate nodes table
     ( echo "BEGIN;"
       kubectl get nodes -lnode-role.kubernetes.io/master!="",px/enabled!=false -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
       echo "COMMIT;"
     ) | psql
-    # FIXME wait for completion, output to configmap
+    # wait for all nodes to complete
+    while :; do
+      n=$(psql -t -c "SELECT count(*) FROM nodes WHERE complete = 'f'")
+      [ "$n" -eq 0 ] && break
+      sleep 1
+    done
+    psql -t -a -F " " -c "SELECT ip, name, skew, swap, memory, cores, var_free, opt_free, kernel FROM nodes ORDER BY ip" --csv | while read ip name skew swap memory cores var_free opt_free kernel; do
+      echo read $ip $name $skew $swap $memory $cores $var_free $opt_free $kernel
+    done
   many.sh: |-
     ip=$(hostname -i)
     while :; do
@@ -239,6 +250,7 @@ data:
     # FIXME populate etcd_nodes
     # FIXME test etcd if external
     # FIXME test cloud creds
+    sql="$sql UPDATE nodes SET complete = 't' WHERE ip = '$ip';"
     psql <<<$sql
     sleep inf
 ---
