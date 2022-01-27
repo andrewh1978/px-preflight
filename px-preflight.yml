@@ -195,9 +195,55 @@ data:
       [ "$n" -eq 0 ] && break
       sleep 1
     done
-    psql -t -a -F " " -c "SELECT ip, name, skew, swap, memory, cores, var_free, opt_free, kernel FROM nodes ORDER BY ip" --csv | while read ip name skew swap memory cores var_free opt_free kernel; do
-      echo read $ip $name $skew $swap $memory $cores $var_free $opt_free $kernel
+    # output nodes yaml
+    echo nodes: >/px-preflight.yml
+    psql -t -A -F " " -c "SELECT ip, name, skew, swap, memory, cores, var_free, opt_free, kernel FROM nodes ORDER BY ip" | while read ip name skew swap memory cores var_free opt_free kernel; do
+      cat <<EOF >>/px-preflight.yml
+      - ip: $ip
+        name: $name
+        skew: $skew
+        swap: $swap
+        memory: $memory
+        cores: $cores
+        varFree: $var_free
+        optFree: $opt_free
+        kernel: $kernel
+        disks:
+    EOF
+      psql -t -A -F " " -c "SELECT disks.file, disks.size FROM disks JOIN nodes ON nodes.id = disks.node_id ORDER BY disks.file" | while read file size; do
+        cat <<EOF >>/px-preflight.yml
+          - file: $file
+            size: $size
+    EOF
+      done
     done
+    echo latency: >>/px-preflight.yml
+    psql -t -A -F " " -c "SELECT source.ip, dest.ip, latency.time FROM latency JOIN nodes source ON source.id = latency.source_id JOIN nodes dest ON dest.id = latency.dest_id ORDER BY source.ip, dest.ip" | while read source dest latency; do
+      cat <<EOF >>/px-preflight.yml
+      - source: $source
+        dest: $dest
+        latency: $latency
+    EOF
+    done
+    echo tcp: >>/px-preflight.yml
+    psql -t -A -F " " -c "SELECT source.ip, dest.ip, tcp.open, tcp.port FROM tcp JOIN nodes source ON source.id = tcp.source_id JOIN nodes dest ON dest.id = tcp.dest_id ORDER BY source.ip, dest.ip, tcp.port" | while read source dest open port; do
+      cat <<EOF >>/px-preflight.yml
+      - source: $source
+        dest: $dest
+        open: $open
+        port: $port
+    EOF
+    done
+    echo udp: >>/px-preflight.yml
+    psql -t -A -F " " -c "SELECT source.ip, dest.ip, udp.open, udp.port FROM udp JOIN nodes source ON source.id = udp.source_id JOIN nodes dest ON dest.id = udp.dest_id ORDER BY source.ip, dest.ip, udp.port" | while read source dest open port; do
+      cat <<EOF >>/px-preflight.yml
+      - source: $source
+        dest: $dest
+        open: $open
+        port: $port
+    EOF
+    done
+    cat /px-preflight.yml
   many.sh: |-
     ip=$(hostname -i)
     while :; do
