@@ -25,6 +25,31 @@ metadata:
   namespace: px-preflight
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: px-preflight-role
+  namespace: px-preflight
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: px-preflight-rb
+  namespace: px-preflight
+subjects:
+  - kind: ServiceAccount
+    name: px-preflight-sa
+roleRef:
+  kind: Role
+  name: px-preflight-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: px-preflight-cr
@@ -139,7 +164,7 @@ data:
       var_free INTEGER,
       opt_free INTEGER,
       kernel TEXT,
-      complete BOOLEAN DEFAULT 'f'
+      complete TEXT DEFAULT 'false'
     );
     CREATE TABLE etcd_nodes (
       id SERIAL PRIMARY KEY,
@@ -154,19 +179,19 @@ data:
     CREATE TABLE tcp (
       source_id INTEGER NOT NULL REFERENCES nodes (id),
       dest_id INTEGER NOT NULL REFERENCES nodes (id),
-      open BOOLEAN NOT NULL,
-      port INTEGER NOT NULL
+      open TEXT NOT NULL,
+      port TEXT NOT NULL
     );
     CREATE TABLE udp (
       source_id INTEGER NOT NULL REFERENCES nodes (id),
       dest_id INTEGER NOT NULL REFERENCES nodes (id),
-      open BOOLEAN NOT NULL,
+      open TEXT NOT NULL,
       port INTEGER NOT NULL
     );
     CREATE TABLE etcd_conn (
       node_id INTEGER NOT NULL REFERENCES nodes (id),
       etcd_id INTEGER NOT NULL REFERENCES etcd_nodes (id),
-      open BOOLEAN NOT NULL
+      open TEXT NOT NULL
     );
     CREATE TABLE disks (
       node_id INTEGER NOT NULL REFERENCES nodes (id),
@@ -191,7 +216,7 @@ data:
     ) | psql
     # wait for all nodes to complete
     while :; do
-      n=$(psql -t -c "SELECT count(*) FROM nodes WHERE complete = 'f'")
+      n=$(psql -t -c "SELECT count(*) FROM nodes WHERE complete = 'false'")
       [ "$n" -eq 0 ] && break
       sleep 1
     done
@@ -243,7 +268,7 @@ data:
         port: $port
     EOF
     done
-    cat /px-preflight.yml
+    kubectl create configmap output --from-file=yaml=/px-preflight.yml -n px-preflight
   many.sh: |-
     ip=$(hostname -i)
     while :; do
@@ -285,18 +310,18 @@ data:
     # test tcp/udp
     for i in $nodes; do
       [ $ip = $i ] && continue
-      nc -uzw 1 $i $[$START_PORT+1] && open=t || open=f
+      nc -uzw 1 $i $[$START_PORT+1] && open=true || open=false
       sql="$sql INSERT INTO udp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $[$START_PORT+1], '$open');"
       for port in $(seq $START_PORT $END_PORT); do
         echo tcp from $ip to $i:$port
-        nc -zw 1 $ip $port && open=t || open=f
+        nc -zw 1 $ip $port && open=true || open=false
         sql="$sql INSERT INTO tcp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $port, '$open');"
       done
     done
     # FIXME populate etcd_nodes
     # FIXME test etcd if external
     # FIXME test cloud creds
-    sql="$sql UPDATE nodes SET complete = 't' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET complete = 'true' WHERE ip = '$ip';"
     psql <<<$sql
     sleep inf
 ---
