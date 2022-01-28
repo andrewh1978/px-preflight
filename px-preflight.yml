@@ -12,11 +12,11 @@ data:
   START_PORT: "9001"
   END_PORT: "9021"
   MIN_CORES: "4"
-  MIN_RAM: "7719"
+  MIN_RAM: "7819"
   MIN_VAR: "3072"
   MIN_OPT: "3072"
-  MAX_PING: "10"
-  MAX_TIMESKEW: "5"
+  MAX_PING: "10000"
+  MAX_TIMESKEW: "3"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -158,7 +158,7 @@ data:
       ip INET UNIQUE NOT NULL,
       name TEXT UNIQUE NOT NULL,
       skew INTEGER,
-      swap INTEGER,
+      swap_disabled TEXT,
       memory INTEGER,
       cores INTEGER,
       var_free INTEGER,
@@ -221,13 +221,23 @@ data:
       sleep 1
     done
     # output nodes yaml
-    echo nodes: >/px-preflight.yml
-    psql -t -A -F " " -c "SELECT ip, name, skew, swap, memory, cores, var_free, opt_free, kernel FROM nodes ORDER BY ip" | while read ip name skew swap memory cores var_free opt_free kernel; do
-      cat <<EOF >>/px-preflight.yml
+    function fail1 {
+      echo "  - node: $1" >>/failures.yaml
+      echo "    error: $2" >>/failures.yaml
+    }
+    function fail2 {
+      echo "  - source: $1" >>/failures.yaml
+      echo "    destination: $2" >>/failures.yaml
+      echo "    error: $3" >>/failures.yaml
+    }
+    echo nodes: >/results.yaml
+    echo failures: >/failures.yaml
+    psql -t -A -F " " -c "SELECT ip, name, skew, swap_disabled, memory, cores, var_free, opt_free, kernel FROM nodes ORDER BY ip" | while read ip name skew swap_disabled memory cores var_free opt_free kernel; do
+      cat <<EOF >>/results.yaml
       - ip: $ip
         name: $name
         skew: $skew
-        swap: $swap
+        swap_disabled: $swap_disabled
         memory: $memory
         cores: $cores
         varFree: $var_free
@@ -235,40 +245,50 @@ data:
         kernel: $kernel
         disks:
     EOF
-      psql -t -A -F " " -c "SELECT disks.file, disks.size FROM disks JOIN nodes ON nodes.id = disks.node_id ORDER BY disks.file" | while read file size; do
-        cat <<EOF >>/px-preflight.yml
+      psql -t -A -F " " -c "SELECT disks.file, disks.size FROM disks JOIN nodes ON nodes.id = disks.node_id WHERE nodes.ip = '$ip' ORDER BY disks.file" | while read file size; do
+        cat <<EOF >>/results.yaml
           - file: $file
             size: $size
     EOF
       done
+      skew=$(echo $skew | sed s/-//)
+      [ $skew -gt $MAX_TIMESKEW ] && fail1 $ip "Time skew $skew exceeds $MAX_TIMESKEW seconds"
+      [ $swap_disabled = "false" ] && fail1 $ip "Swap is enabled"
+      [ $memory -lt $MIN_RAM ] && fail1 $ip "Memory ${memory}MB is less than ${MIN_RAM}MB"
+      [ $cores -lt $MIN_CORES ] && fail1 $ip "Number of cores $cores is less than $MIN_CORES"
+      [ $var_free -lt $MIN_VAR ] && fail1 $ip "/var free space ${var_free}MB is less than ${MIN_VAR}MB"
+      [ $opt_free -lt $MIN_OPT ] && fail1 $ip "/opt free space ${opt_free}MB is less than ${MIN_OPT}MB"
     done
-    echo latency: >>/px-preflight.yml
+    echo latency: >>/results.yaml
     psql -t -A -F " " -c "SELECT source.ip, dest.ip, latency.time FROM latency JOIN nodes source ON source.id = latency.source_id JOIN nodes dest ON dest.id = latency.dest_id ORDER BY source.ip, dest.ip" | while read source dest latency; do
-      cat <<EOF >>/px-preflight.yml
+      cat <<EOF >>/results.yaml
       - source: $source
         dest: $dest
         latency: $latency
     EOF
+      [ $latency -gt $MAX_PING ] && fail2 $source $dest "Latency is ${latency}us which exceeds ${MAX_PING}us"
     done
-    echo tcp: >>/px-preflight.yml
+    echo tcp: >>/results.yaml
     psql -t -A -F " " -c "SELECT source.ip, dest.ip, tcp.open, tcp.port FROM tcp JOIN nodes source ON source.id = tcp.source_id JOIN nodes dest ON dest.id = tcp.dest_id ORDER BY source.ip, dest.ip, tcp.port" | while read source dest open port; do
-      cat <<EOF >>/px-preflight.yml
+      cat <<EOF >>/results.yaml
       - source: $source
         dest: $dest
         open: $open
         port: $port
     EOF
+      [ $open = false ] && fail2 $source $dest "Cannot connect on TCP port $port"
     done
-    echo udp: >>/px-preflight.yml
+    echo udp: >>/results.yaml
     psql -t -A -F " " -c "SELECT source.ip, dest.ip, udp.open, udp.port FROM udp JOIN nodes source ON source.id = udp.source_id JOIN nodes dest ON dest.id = udp.dest_id ORDER BY source.ip, dest.ip, udp.port" | while read source dest open port; do
-      cat <<EOF >>/px-preflight.yml
+      cat <<EOF >>/results.yaml
       - source: $source
         dest: $dest
         open: $open
         port: $port
     EOF
+      [ $open = false ] && fail2 $source $dest "Cannot connect on UDP port $port"
     done
-    kubectl create configmap output --from-file=yaml=/px-preflight.yml -n px-preflight
+    kubectl create configmap output --from-file=results=/results.yaml --from-file=failures=/failures.yaml -n px-preflight
   many.sh: |-
     ip=$(hostname -i)
     while :; do
@@ -285,7 +305,7 @@ data:
     # test latency
     for i in $nodes; do
       [ $ip = $i ] && continue
-      latency=$(ping -qc 4 -w 5 $i | grep avg | cut -f 5 -d /)
+      latency=$(echo $(ping -qc 4 -w 5 $i | grep avg | cut -f 5 -d /)*1000 | bc)
       [ "$latency" ] || latency=-1
       sql="$sql INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency);"
     done
@@ -302,7 +322,7 @@ data:
     # get kernel
     sql="$sql UPDATE nodes SET kernel = '$(uname -r)' WHERE ip = '$ip';"
     # get resources
-    sql="$sql UPDATE nodes SET swap = '$(tail +2 /proc/swaps | wc -l)' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET swap_disabled = '$([ "$(tail +2 /proc/swaps)" ] && echo false || echo true)' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET cores = '$(grep -c processor /proc/cpuinfo)' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET memory = '$(free -m | awk '/Mem/{print$2}')' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET opt_free = '$(df -m /host-opt | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
@@ -350,6 +370,8 @@ spec:
         envFrom:
         - configMapRef:
             name: env
+        - configMapRef:
+            name: config
       volumes:
       - name: initdb
         configMap:
@@ -381,6 +403,8 @@ spec:
         envFrom:
         - configMapRef:
             name: env
+        - configMapRef:
+            name: config
       volumes:
       - name: one
         configMap:
