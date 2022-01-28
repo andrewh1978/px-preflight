@@ -33,7 +33,20 @@ remote: Total 63 (delta 29), reused 50 (delta 16), pack-reused 0
 Unpacking objects: 100% (63/63), done.
 ```
 
-3. Configure:
+3. Build the image:
+```
+[root@master-1 px-preflight]# docker build -t px-preflight .
+...
+```
+This image will need pushing to your registry.
+
+Alternatively, there is a script to build the image and load it on each node:
+```
+[root@master-1 px-preflight]# sh distribute_image.sh
+...
+```
+
+4. Configure:
 ```
 [root@master-1 ~]# cd px-preflight
 [root@master-1 px-preflight]# vi px-preflight.yml
@@ -42,7 +55,7 @@ Find the ConfigMap called `config`.
  * Configure the port range with `START_PORT` and `END_PORT`
  * The default `MIN` and `MAX` thresholds should be fine for most use-cases
 
-4. Run:
+5. Run:
 ```
 [root@master-1 px-preflight]# kubectl apply -f px-preflight.yml
 namespace/px-preflight created
@@ -61,9 +74,10 @@ job.batch/one created
 daemonset.apps/many created
 ```
 
-5. View the results:
+6. View the results:
 ```
-[root@master-1 px-preflight]# kubectl get configmap -n px-preflight output -o jsonpath='{.data.yaml}'
+[root@master-1 px-preflight]# kubectl get configmap -n px-preflight output -o jsonpath='{.data.results}'
+[root@master-1 px-preflight]# kubectl get configmap -n px-preflight output -o jsonpath='{.data.failures}'
 ```
 
 # TODO
