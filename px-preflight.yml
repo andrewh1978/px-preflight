@@ -18,6 +18,32 @@ data:
   MAX_PING: "10000"
   MAX_TIMESKEW: "3"
 ---
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: px-preflight-psp
+spec:
+  privileged: true
+  allowPrivilegeEscalation: true
+  allowedCapabilities:
+  - '*'
+  volumes:
+  - '*'
+  hostNetwork: true
+  hostPorts:
+  - min: 0
+    max: 65535
+  hostIPC: true
+  hostPID: true
+  runAsUser:
+    rule: 'RunAsAny'
+  seLinux:
+    rule: 'RunAsAny'
+  supplementalGroups:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -59,6 +85,11 @@ rules:
   - nodes
   verbs:
   - list
+- apiGroups: ['policy']
+  resources: ['podsecuritypolicies']
+  verbs:     ['use']
+  resourceNames:
+  - px-preflight-psp
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -112,6 +143,7 @@ spec:
           initialDelaySeconds: 1
           timeoutSeconds: 2
           periodSeconds: 5
+      serviceAccountName: px-preflight-sa
 ---
 apiVersion: v1
 kind: Service
@@ -211,7 +243,7 @@ data:
     done
     # populate nodes table
     ( echo "BEGIN;"
-      kubectl get nodes -lnode-role.kubernetes.io/master!="",px/enabled!=false -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
+      kubectl get nodes -lnode-role.kubernetes.io/controlplane!="true",node-role.kubernetes.io/master!="",px/enabled!=false -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
       echo "COMMIT;"
     ) | psql
     # wait for all nodes to complete
@@ -290,12 +322,13 @@ data:
     done
     kubectl create configmap output --from-file=results=/results.yaml --from-file=failures=/failures.yaml -n px-preflight
   many.sh: |-
-    ip=$(hostname -i)
+    name=$(hostname)
     while :; do
       nodes=$(psql -t -c 'SELECT ip from nodes')
       [ "$nodes" ] && break
       sleep 1
     done
+    ip=$(psql -t -A -c "SELECT ip FROM nodes WHERE name = '$name'")
     # start udp listener
     nc -ukl $[$START_PORT+1] &
     # start tcp listeners
@@ -377,6 +410,7 @@ spec:
         configMap:
           name: files
       restartPolicy: OnFailure
+      serviceAccountName: px-preflight-sa
 ---
 apiVersion: batch/v1
 kind: Job
@@ -471,3 +505,4 @@ spec:
               name: config
           - configMapRef:
               name: env
+      serviceAccountName: px-preflight-sa
