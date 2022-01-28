@@ -74,7 +74,7 @@ job.batch/one created
 daemonset.apps/many created
 ```
 
-6. View the results:
+6. After a short time, you should be able to view the results:
 ```
 [root@master-1 px-preflight]# kubectl get configmap -n px-preflight output -o jsonpath='{.data.results}'
 [root@master-1 px-preflight]# kubectl get configmap -n px-preflight output -o jsonpath='{.data.failures}'
