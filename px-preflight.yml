@@ -308,7 +308,7 @@ data:
       [ "$nodes" ] && break
       sleep 1
     done
-    ip=$(psql -t -A -c "SELECT ip FROM nodes WHERE name LIKE '$name.%'")
+    ip=$(psql -t -A -c "SELECT ip FROM nodes WHERE name LIKE '$name.%' OR name = '$name'")
     # start udp listener
     nc -ukl $[$START_PORT+1] &
     # start tcp listeners
