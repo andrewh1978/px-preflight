@@ -1,0 +1,490 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: px-preflight
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: px-preflight
+data:
+  START_PORT: "9001"
+  END_PORT: "9021"
+  MIN_CORES: "4"
+  MIN_RAM: "7819"
+  MIN_VAR: "3072"
+  MIN_OPT: "3072"
+  MAX_PING: "10000"
+  MAX_TIMESKEW: "3"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: px-preflight-sa
+  namespace: px-preflight
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: px-preflight-role
+  namespace: px-preflight
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+    - security.openshift.io
+    resourceNames:
+    - privileged
+    resources:
+    - securitycontextconstraints
+    verbs:
+    - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: px-preflight-rb
+  namespace: px-preflight
+subjects:
+  - kind: ServiceAccount
+    name: px-preflight-sa
+roleRef:
+  kind: Role
+  name: px-preflight-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: px-preflight-cr
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  verbs:
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: px-preflight-crb
+subjects:
+- kind: ServiceAccount
+  name: px-preflight-sa
+  namespace: px-preflight
+roleRef:
+  kind: ClusterRole
+  name: px-preflight-cr
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: px-preflight
+spec:
+  selector:
+    matchLabels:
+      app: postgres
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      securityContext:
+        runAsUser: 101
+      terminationGracePeriodSeconds: 0
+      containers:
+      - name: postgres
+        image: px-preflight
+        imagePullPolicy: "IfNotPresent"
+        ports:
+        - containerPort: 5432
+        command: ["/usr/lib/postgresql/12/bin/postgres", "-c", "config_file=/etc/postgresql/12/main/postgresql.conf", "-h", "*"]
+        readinessProbe:
+          exec:
+            command: ["psql", "-U", "postgres", "-c", "SELECT 1"]
+          initialDelaySeconds: 1
+          timeoutSeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["psql", "-U", "postgres", "-c", "SELECT 1"]
+          initialDelaySeconds: 1
+          timeoutSeconds: 2
+          periodSeconds: 5
+      serviceAccountName: px-preflight-sa
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: px-preflight
+spec:
+  selector:
+    app: postgres
+  type: NodePort
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+      nodePort: 32432
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: env
+  namespace: px-preflight
+data:
+  PGUSER: "postgres"
+  PGDATABASE: "px-preflight"
+  PGHOST: "127.0.0.1"
+  PGPORT: "32432"
+  PGCONNECT_TIMEOUT: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: files
+  namespace: px-preflight
+data:
+  initdb.sh: |-
+    while ! psql -c 'SELECT 1' postgres; do
+      echo waiting for postgresql
+      sleep 1
+    done
+    createdb -EUTF8
+    psql <<EOF
+    CREATE TABLE nodes (
+      id SERIAL PRIMARY KEY,
+      ip INET UNIQUE NOT NULL,
+      name TEXT UNIQUE NOT NULL,
+      skew INTEGER,
+      swap_disabled TEXT,
+      memory INTEGER,
+      cores INTEGER,
+      var_free INTEGER,
+      opt_free INTEGER,
+      kernel TEXT,
+      complete TEXT DEFAULT 'false'
+    );
+    CREATE TABLE etcd_nodes (
+      id SERIAL PRIMARY KEY,
+      ip TEXT NOT NULL,
+      port INTEGER NOT NULL
+    );
+    CREATE TABLE latency (
+      source_id INTEGER NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER NOT NULL REFERENCES nodes (id),
+      time REAL NOT NULL
+    );
+    CREATE TABLE tcp (
+      source_id INTEGER NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER NOT NULL REFERENCES nodes (id),
+      open TEXT NOT NULL,
+      port TEXT NOT NULL
+    );
+    CREATE TABLE udp (
+      source_id INTEGER NOT NULL REFERENCES nodes (id),
+      dest_id INTEGER NOT NULL REFERENCES nodes (id),
+      open TEXT NOT NULL,
+      port INTEGER NOT NULL
+    );
+    CREATE TABLE etcd_conn (
+      node_id INTEGER NOT NULL REFERENCES nodes (id),
+      etcd_id INTEGER NOT NULL REFERENCES etcd_nodes (id),
+      open TEXT NOT NULL
+    );
+    CREATE TABLE disks (
+      node_id INTEGER NOT NULL REFERENCES nodes (id),
+      file TEXT NOT NULL,
+      size INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX latency_idx ON latency (source_id, dest_id);
+    CREATE UNIQUE INDEX etcd_idx ON etcd_nodes (ip, port);
+    CREATE UNIQUE INDEX tcp_idx ON tcp (source_id, dest_id, port);
+    CREATE UNIQUE INDEX udp_idx ON udp (source_id, dest_id, port);
+    CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
+    EOF
+  one.sh: |-
+    # check database is up
+    while ! psql -c 'SELECT count(*) from nodes'; do
+      sleep 1
+    done
+    # populate nodes table
+    ( echo "BEGIN;"
+      kubectl get nodes -lnode-role.kubernetes.io/controlplane!="true",node-role.kubernetes.io/master!="",px/enabled!=false -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
+      echo "COMMIT;"
+    ) | psql
+    # wait for all nodes to complete
+    while :; do
+      n=$(psql -t -c "SELECT count(*) FROM nodes WHERE complete = 'false'")
+      [ "$n" -eq 0 ] && break
+      sleep 1
+    done
+    # output nodes yaml
+    function fail1 {
+      echo "  - node: $1" >>/failures.yaml
+      echo "    error: $2" >>/failures.yaml
+    }
+    function fail2 {
+      echo "  - source: $1" >>/failures.yaml
+      echo "    destination: $2" >>/failures.yaml
+      echo "    error: $3" >>/failures.yaml
+    }
+    echo nodes: >/results.yaml
+    echo failures: >/failures.yaml
+    psql -t -A -F " " -c "SELECT ip, name, skew, swap_disabled, memory, cores, var_free, opt_free, kernel FROM nodes ORDER BY ip" | while read ip name skew swap_disabled memory cores var_free opt_free kernel; do
+      cat <<EOF >>/results.yaml
+      - ip: $ip
+        name: $name
+        skew: $skew
+        swap_disabled: $swap_disabled
+        memory: $memory
+        cores: $cores
+        varFree: $var_free
+        optFree: $opt_free
+        kernel: $kernel
+        disks:
+    EOF
+      psql -t -A -F " " -c "SELECT disks.file, disks.size FROM disks JOIN nodes ON nodes.id = disks.node_id WHERE nodes.ip = '$ip' ORDER BY disks.file" | while read file size; do
+        cat <<EOF >>/results.yaml
+          - file: $file
+            size: $size
+    EOF
+      done
+      skew=$(echo $skew | sed s/-//)
+      [ $skew -gt $MAX_TIMESKEW ] && fail1 $ip "Time skew $skew exceeds $MAX_TIMESKEW seconds"
+      [ $swap_disabled = "false" ] && fail1 $ip "Swap is enabled"
+      [ $memory -lt $MIN_RAM ] && fail1 $ip "Memory ${memory}MB is less than ${MIN_RAM}MB"
+      [ $cores -lt $MIN_CORES ] && fail1 $ip "Number of cores $cores is less than $MIN_CORES"
+      [ $var_free -lt $MIN_VAR ] && fail1 $ip "/var free space ${var_free}MB is less than ${MIN_VAR}MB"
+      [ $opt_free -lt $MIN_OPT ] && fail1 $ip "/opt free space ${opt_free}MB is less than ${MIN_OPT}MB"
+    done
+    echo latency: >>/results.yaml
+    psql -t -A -F " " -c "SELECT source.ip, dest.ip, latency.time FROM latency JOIN nodes source ON source.id = latency.source_id JOIN nodes dest ON dest.id = latency.dest_id ORDER BY source.ip, dest.ip" | while read source dest latency; do
+      cat <<EOF >>/results.yaml
+      - source: $source
+        dest: $dest
+        latency: $latency
+    EOF
+      [ $latency -gt $MAX_PING ] && fail2 $source $dest "Latency is ${latency}us which exceeds ${MAX_PING}us"
+    done
+    echo tcp: >>/results.yaml
+    psql -t -A -F " " -c "SELECT source.ip, dest.ip, tcp.open, tcp.port FROM tcp JOIN nodes source ON source.id = tcp.source_id JOIN nodes dest ON dest.id = tcp.dest_id ORDER BY source.ip, dest.ip, tcp.port" | while read source dest open port; do
+      cat <<EOF >>/results.yaml
+      - source: $source
+        dest: $dest
+        open: $open
+        port: $port
+    EOF
+      [ $open = false ] && fail2 $source $dest "Cannot connect on TCP port $port"
+    done
+    echo udp: >>/results.yaml
+    psql -t -A -F " " -c "SELECT source.ip, dest.ip, udp.open, udp.port FROM udp JOIN nodes source ON source.id = udp.source_id JOIN nodes dest ON dest.id = udp.dest_id ORDER BY source.ip, dest.ip, udp.port" | while read source dest open port; do
+      cat <<EOF >>/results.yaml
+      - source: $source
+        dest: $dest
+        open: $open
+        port: $port
+    EOF
+      [ $open = false ] && fail2 $source $dest "Cannot connect on UDP port $port"
+    done
+    kubectl create configmap output --from-file=results=/results.yaml --from-file=failures=/failures.yaml -n px-preflight
+  many.sh: |-
+    name=$(hostname)
+    while :; do
+      nodes=$(psql -t -c 'SELECT ip from nodes')
+      [ "$nodes" ] && break
+      sleep 1
+    done
+    ip=$(psql -t -A -c "SELECT ip FROM nodes WHERE name LIKE '$name.%'")
+    # start udp listener
+    nc -ukl $[$START_PORT+1] &
+    # start tcp listeners
+    for i in $(seq $START_PORT $END_PORT); do
+      nc -kl $i &
+    done
+    # test latency
+    for i in $nodes; do
+      [ $ip = $i ] && continue
+      latency=$(echo $(ping -qc 4 -w 5 $i | grep avg | cut -f 5 -d /)*1000 | bc)
+      [ "$latency" ] || latency=-1
+      sql="$sql INSERT INTO latency (source_id, dest_id, time) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $latency);"
+    done
+    # get disks
+    disksql=$(lsblk -dnsb -o NAME,SIZE,TYPE,MOUNTPOINT | grep -v '`' | while read n s t m; do
+      [ $m ] && continue
+      s=$[$s/1073741824]
+      [ $s -ge 8 ] && echo "INSERT INTO disks (node_id, file, size) SELECT id, '$n', $s FROM nodes WHERE ip = '$ip';"
+    done)
+    sql="$sql $disksql"
+    # get skew
+    t=$(curl -s --http0.9 time.nist.gov:13 | tail -1 | cut -f 2,3 -d " ")
+    [ "$t" ] && sql="$sql UPDATE nodes SET skew = '$[$(date +%s)-$(date +%s -d "20$t")]' WHERE ip = '$ip';"
+    # get kernel
+    sql="$sql UPDATE nodes SET kernel = '$(uname -r)' WHERE ip = '$ip';"
+    # get resources
+    sql="$sql UPDATE nodes SET swap_disabled = '$([ "$(tail +2 /proc/swaps)" ] && echo false || echo true)' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET cores = '$(grep -c processor /proc/cpuinfo)' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET memory = '$(free -m | awk '/Mem/{print$2}')' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET opt_free = '$(df -m /host-opt | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
+    sql="$sql UPDATE nodes SET var_free = '$(df -m /host-var/lib | tail -1 | awk '{print$4}')' WHERE ip = '$ip';"
+    # test tcp/udp
+    for i in $nodes; do
+      [ $ip = $i ] && continue
+      nc -uzw 1 $i $[$START_PORT+1] && open=true || open=false
+      sql="$sql INSERT INTO udp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $[$START_PORT+1], '$open');"
+      for port in $(seq $START_PORT $END_PORT); do
+        echo tcp from $ip to $i:$port
+        nc -zw 1 $ip $port && open=true || open=false
+        sql="$sql INSERT INTO tcp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $port, '$open');"
+      done
+    done
+    # FIXME populate etcd_nodes
+    # FIXME test etcd if external
+    # FIXME test cloud creds
+    sql="$sql UPDATE nodes SET complete = 'true' WHERE ip = '$ip';"
+    psql <<<$sql
+    sleep inf
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: initdb
+  namespace: px-preflight
+spec:
+  template:
+    metadata:
+      name: initdb
+      labels:
+        app: initdb
+    spec:
+      hostNetwork: true
+      terminationGracePeriodSeconds: 0
+      containers:
+      - name: initdb
+        image: px-preflight
+        imagePullPolicy: "IfNotPresent"
+        command: [ "/bin/bash", "/initdb.sh" ]
+        volumeMounts:
+        - name: initdb
+          mountPath: /initdb.sh
+          subPath: initdb.sh
+        envFrom:
+        - configMapRef:
+            name: env
+        - configMapRef:
+            name: config
+      volumes:
+      - name: initdb
+        configMap:
+          name: files
+      restartPolicy: OnFailure
+      serviceAccountName: px-preflight-sa
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: one
+  namespace: px-preflight
+spec:
+  template:
+    metadata:
+      name: one
+      labels:
+        app: one
+    spec:
+      hostNetwork: true
+      terminationGracePeriodSeconds: 0
+      containers:
+      - name: one
+        image: px-preflight
+        imagePullPolicy: "IfNotPresent"
+        command: [ "/bin/bash", "/one.sh" ]
+        volumeMounts:
+        - name: one
+          mountPath: /one.sh
+          subPath: one.sh
+        envFrom:
+        - configMapRef:
+            name: env
+        - configMapRef:
+            name: config
+      volumes:
+      - name: one
+        configMap:
+          name: files
+      restartPolicy: OnFailure
+      serviceAccountName: px-preflight-sa
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: many
+  namespace: px-preflight
+  labels:
+    app: many
+spec:
+  selector:
+    matchLabels:
+      app: many
+  minReadySeconds: 0
+  template:
+    metadata:
+      labels:
+        app: many
+    spec:
+      hostNetwork: true
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: px/enabled
+                operator: NotIn
+                values:
+                - "false"
+      terminationGracePeriodSeconds: 0
+      volumes:
+      - name: many
+        configMap:
+          name: files
+      - name: host-var
+        hostPath:
+          path: /var
+          type: Directory
+      - name: host-opt
+        hostPath:
+          path: /opt
+          type: Directory
+      containers:
+        - name: many
+          image: px-preflight
+          imagePullPolicy: "IfNotPresent"
+          command: [ "/bin/bash", "/many.sh" ]
+          volumeMounts:
+          - name: many
+            mountPath: /many.sh
+            readOnly: true
+            subPath: many.sh
+          - name: host-var
+            mountPath: /host-var
+          - name: host-opt
+            mountPath: /host-opt
+          envFrom:
+          - configMapRef:
+              name: config
+          - configMapRef:
+              name: env
+      serviceAccountName: px-preflight-sa
