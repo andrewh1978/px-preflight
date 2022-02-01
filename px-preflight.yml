@@ -18,32 +18,6 @@ data:
   MAX_PING: "10000"
   MAX_TIMESKEW: "3"
 ---
-apiVersion: policy/v1beta1
-kind: PodSecurityPolicy
-metadata:
-  name: px-preflight-psp
-spec:
-  privileged: true
-  allowPrivilegeEscalation: true
-  allowedCapabilities:
-  - '*'
-  volumes:
-  - '*'
-  hostNetwork: true
-  hostPorts:
-  - min: 0
-    max: 65535
-  hostIPC: true
-  hostPID: true
-  runAsUser:
-    rule: 'RunAsAny'
-  seLinux:
-    rule: 'RunAsAny'
-  supplementalGroups:
-    rule: 'RunAsAny'
-  fsGroup:
-    rule: 'RunAsAny'
----
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -61,6 +35,14 @@ rules:
       - configmaps
     verbs:
       - create
+  - apiGroups:
+    - security.openshift.io
+    resourceNames:
+    - privileged
+    resources:
+    - securitycontextconstraints
+    verbs:
+    - use
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -85,11 +67,6 @@ rules:
   - nodes
   verbs:
   - list
-- apiGroups: ['policy']
-  resources: ['podsecuritypolicies']
-  verbs:     ['use']
-  resourceNames:
-  - px-preflight-psp
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -124,13 +101,16 @@ spec:
       labels:
         app: postgres
     spec:
+      securityContext:
+        runAsUser: 101
+      terminationGracePeriodSeconds: 0
       containers:
       - name: postgres
         image: px-preflight
         imagePullPolicy: "IfNotPresent"
         ports:
         - containerPort: 5432
-        command: ["su", "-", "postgres", "-c", "/usr/lib/postgresql/12/bin/postgres -c config_file=/etc/postgresql/12/main/postgresql.conf -h '*'"]
+        command: ["/usr/lib/postgresql/12/bin/postgres", "-c", "config_file=/etc/postgresql/12/main/postgresql.conf", "-h", "*"]
         readinessProbe:
           exec:
             command: ["psql", "-U", "postgres", "-c", "SELECT 1"]
@@ -328,7 +308,7 @@ data:
       [ "$nodes" ] && break
       sleep 1
     done
-    ip=$(psql -t -A -c "SELECT ip FROM nodes WHERE name = '$name'")
+    ip=$(psql -t -A -c "SELECT ip FROM nodes WHERE name LIKE '$name.%'")
     # start udp listener
     nc -ukl $[$START_PORT+1] &
     # start tcp listeners
@@ -391,6 +371,7 @@ spec:
         app: initdb
     spec:
       hostNetwork: true
+      terminationGracePeriodSeconds: 0
       containers:
       - name: initdb
         image: px-preflight
@@ -425,6 +406,7 @@ spec:
         app: one
     spec:
       hostNetwork: true
+      terminationGracePeriodSeconds: 0
       containers:
       - name: one
         image: px-preflight
