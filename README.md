@@ -35,18 +35,18 @@ Unpacking objects: 100% (63/63), done.
 
 3. Build the image:
 ```
-[root@master-1 px-preflight]# docker build -t px-preflight .
-...
-```
-This image will need pushing to your registry.
-
-Alternatively, there is a script to build the image and load it on each node:
-```
-[root@master-1 px-preflight]# sh distribute_image.sh
+[root@master-1 px-preflight]# docker build -t andrewh1978/px-preflight .
 ...
 ```
 
-4. Configure:
+4. Push the image to your registry:
+```
+[root@master-1 px-preflight]# docker login registry-1.docker.io
+[root@master-1 px-preflight]# docker push andrewh1978/px-preflight
+...
+```
+
+5. Configure:
 ```
 [root@master-1 ~]# cd px-preflight
 [root@master-1 px-preflight]# vi px-preflight.yml
@@ -54,6 +54,7 @@ Alternatively, there is a script to build the image and load it on each node:
 Find the ConfigMap called `config`.
  * Configure the port range with `START_PORT` and `END_PORT`
  * The default `MIN` and `MAX` thresholds should be fine for most use-cases
+Also update the `image` parameters (if necessary).
 
 5. Run:
 ```

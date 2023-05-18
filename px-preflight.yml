@@ -106,7 +106,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
       - name: postgres
-        image: px-preflight
+        image: andrewh1978/px-preflight
         imagePullPolicy: "IfNotPresent"
         ports:
         - containerPort: 5432
@@ -223,7 +223,7 @@ data:
     done
     # populate nodes table
     ( echo "BEGIN;"
-      kubectl get nodes -lnode-role.kubernetes.io/controlplane!="true",node-role.kubernetes.io/master!="",px/enabled!=false -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
+      kubectl get nodes -l'!node-role.kubernetes.io/control-plane,!node-role.kubernetes.io/master,px/enabled!=false' -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
       echo "COMMIT;"
     ) | psql
     # wait for all nodes to complete
@@ -374,7 +374,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
       - name: initdb
-        image: px-preflight
+        image: andrewh1978/px-preflight
         imagePullPolicy: "IfNotPresent"
         command: [ "/bin/bash", "/initdb.sh" ]
         volumeMounts:
@@ -409,7 +409,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
       - name: one
-        image: px-preflight
+        image: andrewh1978/px-preflight
         imagePullPolicy: "IfNotPresent"
         command: [ "/bin/bash", "/one.sh" ]
         volumeMounts:
@@ -470,7 +470,7 @@ spec:
           type: Directory
       containers:
         - name: many
-          image: px-preflight
+          image: andrewh1978/px-preflight
           imagePullPolicy: "IfNotPresent"
           command: [ "/bin/bash", "/many.sh" ]
           volumeMounts:
