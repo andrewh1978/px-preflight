@@ -53,10 +53,11 @@ Unpacking objects: 100% (63/63), done.
 ```
 Find the ConfigMap called `config`.
  * Configure the port range with `START_PORT` and `END_PORT`
+ * Adjust the node filter
  * The default `MIN` and `MAX` thresholds should be fine for most use-cases
 Also update the `image` parameters (if necessary).
 
-5. Run:
+6. Run:
 ```
 [root@master-1 px-preflight]# kubectl apply -f px-preflight.yml
 namespace/px-preflight created
@@ -75,7 +76,7 @@ job.batch/one created
 daemonset.apps/many created
 ```
 
-6. After a short time, you should be able to view the results:
+7. After a short time, you should be able to view the results:
 ```
 [root@master-1 px-preflight]# kubectl get configmap -n px-preflight output -o jsonpath='{.data.results}'
 [root@master-1 px-preflight]# kubectl get configmap -n px-preflight output -o jsonpath='{.data.failures}'

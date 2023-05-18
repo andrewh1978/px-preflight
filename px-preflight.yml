@@ -17,6 +17,7 @@ data:
   MIN_OPT: "3072"
   MAX_PING: "10000"
   MAX_TIMESKEW: "3"
+  NODE_FILTER: "!node-role.kubernetes.io/control-plane,!node-role.kubernetes.io/master,px/enabled!=false"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -175,6 +176,8 @@ data:
       cores INTEGER,
       var_free INTEGER,
       opt_free INTEGER,
+      distro TEXT,
+      runtime TEXT,
       kernel TEXT,
       complete TEXT DEFAULT 'false'
     );
@@ -223,9 +226,13 @@ data:
     done
     # populate nodes table
     ( echo "BEGIN;"
-      kubectl get nodes -l'!node-role.kubernetes.io/control-plane,!node-role.kubernetes.io/master,px/enabled!=false' -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
+      kubectl get nodes -l$NODE_FILTER -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
       echo "COMMIT;"
     ) | psql
+    # get additional node info
+    kubectl get nodes -l$NODE_FILTER -o="custom-columns=NAME:.metadata.name,IMAGE:.status.nodeInfo.osImage" --no-headers | while read name distro; do echo "UPDATE nodes SET distro = '$distro' WHERE name = '$name';"; done | psql
+    kubectl get nodes -l$NODE_FILTER -o="custom-columns=NAME:.metadata.name,IMAGE:.status.nodeInfo.containerRuntimeVersion" --no-headers | while read name runtime; do echo "UPDATE nodes SET runtime = '$runtime' WHERE name = '$name';"; done | psql
+    kubectl get nodes -l$NODE_FILTER -o="custom-columns=NAME:.metadata.name,IMAGE:.status.nodeInfo.kernelVersion" --no-headers | while read name kernel; do echo "UPDATE nodes SET kernel = '$kernel' WHERE name = '$name';"; done | psql
     # wait for all nodes to complete
     while :; do
       n=$(psql -t -c "SELECT count(*) FROM nodes WHERE complete = 'false'")
@@ -244,7 +251,7 @@ data:
     }
     echo nodes: >/results.yaml
     echo failures: >/failures.yaml
-    psql -t -A -F " " -c "SELECT ip, name, skew, swap_disabled, memory, cores, var_free, opt_free, kernel FROM nodes ORDER BY ip" | while read ip name skew swap_disabled memory cores var_free opt_free kernel; do
+    psql -t -A -F " " -c "SELECT ip, name, skew, swap_disabled, memory, cores, var_free, opt_free, kernel, encode(runtime::bytea,'base64'), encode(distro::bytea,'base64') FROM nodes ORDER BY ip" | while read ip name skew swap_disabled memory cores var_free opt_free kernel runtime distro; do
       cat <<EOF >>/results.yaml
       - ip: $ip
         name: $name
@@ -255,6 +262,8 @@ data:
         varFree: $var_free
         optFree: $opt_free
         kernel: $kernel
+        runtime: $(base64 -d <<<$runtime)
+        distro: $(base64 -d <<<$distro)
         disks:
     EOF
       psql -t -A -F " " -c "SELECT disks.file, disks.size FROM disks JOIN nodes ON nodes.id = disks.node_id WHERE nodes.ip = '$ip' ORDER BY disks.file" | while read file size; do
@@ -332,8 +341,6 @@ data:
     # get skew
     t=$(curl -s --http0.9 time.nist.gov:13 | tail -1 | cut -f 2,3 -d " ")
     [ "$t" ] && sql="$sql UPDATE nodes SET skew = '$[$(date +%s)-$(date +%s -d "20$t")]' WHERE ip = '$ip';"
-    # get kernel
-    sql="$sql UPDATE nodes SET kernel = '$(uname -r)' WHERE ip = '$ip';"
     # get resources
     sql="$sql UPDATE nodes SET swap_disabled = '$([ "$(tail +2 /proc/swaps)" ] && echo false || echo true)' WHERE ip = '$ip';"
     sql="$sql UPDATE nodes SET cores = '$(grep -c processor /proc/cpuinfo)' WHERE ip = '$ip';"
