@@ -24,7 +24,7 @@ node-1-3   Ready    <none>   5h58m   v1.16.2
 
 2. Clone this repo:
 ```
-[root@master-1 px-preflight]# git clone https://github.com/andrewh1978/px-preflight
+[root@master-1 ~]# git clone https://github.com/andrewh1978/px-preflight
 Cloning into 'px-preflight'...
 remote: Enumerating objects: 63, done.
 remote: Counting objects: 100% (63/63), done.
@@ -35,6 +35,7 @@ Unpacking objects: 100% (63/63), done.
 
 3. Build the image:
 ```
+[root@master-1 ~]# cd px-preflight
 [root@master-1 px-preflight]# docker build -t andrewh1978/px-preflight .
 ...
 ```
@@ -48,7 +49,6 @@ Unpacking objects: 100% (63/63), done.
 
 5. Configure:
 ```
-[root@master-1 ~]# cd px-preflight
 [root@master-1 px-preflight]# vi px-preflight.yml
 ```
 Find the ConfigMap called `config`.
