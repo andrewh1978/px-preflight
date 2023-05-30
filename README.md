@@ -9,6 +9,7 @@ This will provision some objects on your Kubernetes cluster, use them to run som
  * Network connectivity between all worker nodes in the defined port range
  * Ping latency
  * Block devices
+ * etcd connectivity
 
 # How
 
@@ -55,6 +56,7 @@ Find the ConfigMap called `config`.
  * Configure the port range with `START_PORT` and `END_PORT`
  * Adjust the node filter
  * The default `MIN` and `MAX` thresholds should be fine for most use-cases
+ * Uncomment and edit `ETCD_ENDPOINTS` if using external etcd
 Also update the `image` parameters (if necessary).
 
 6. Run:
@@ -84,6 +86,4 @@ daemonset.apps/many created
 
 # TODO
 
- * populate etcd_nodes
- * test etcd if external
  * test cloud creds

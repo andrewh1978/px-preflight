@@ -18,6 +18,7 @@ data:
   MAX_PING: "10000"
   MAX_TIMESKEW: "3"
   NODE_FILTER: "!node-role.kubernetes.io/control-plane,!node-role.kubernetes.io/master,px/enabled!=false"
+  #ETCD_ENDPOINTS: "192.168.101.101:2379,192.168.101.102:2379,192.168.101.103:2379"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -108,7 +109,7 @@ spec:
       containers:
       - name: postgres
         image: andrewh1978/px-preflight
-        imagePullPolicy: "IfNotPresent"
+        imagePullPolicy: "Always"
         ports:
         - containerPort: 5432
         command: ["/usr/lib/postgresql/12/bin/postgres", "-c", "config_file=/etc/postgresql/12/main/postgresql.conf", "-h", "*"]
@@ -183,8 +184,7 @@ data:
     );
     CREATE TABLE etcd_nodes (
       id SERIAL PRIMARY KEY,
-      ip TEXT NOT NULL,
-      port INTEGER NOT NULL
+      endpoint TEXT NOT NULL
     );
     CREATE TABLE latency (
       source_id INTEGER NOT NULL REFERENCES nodes (id),
@@ -214,7 +214,7 @@ data:
       size INTEGER NOT NULL
     );
     CREATE UNIQUE INDEX latency_idx ON latency (source_id, dest_id);
-    CREATE UNIQUE INDEX etcd_idx ON etcd_nodes (ip, port);
+    CREATE UNIQUE INDEX etcd_idx ON etcd_nodes (endpoint);
     CREATE UNIQUE INDEX tcp_idx ON tcp (source_id, dest_id, port);
     CREATE UNIQUE INDEX udp_idx ON udp (source_id, dest_id, port);
     CREATE UNIQUE INDEX disk_idx ON disks (node_id, file);
@@ -224,6 +224,13 @@ data:
     while ! psql -c 'SELECT count(*) from nodes'; do
       sleep 1
     done
+    # populate etcd_nodes table
+    if [ $ETCD_ENDPOINTS ]; then
+      IFS=, read -a etcd_endpoints <<<$ETCD_ENDPOINTS
+      for e in "${etcd_endpoints[@]}"; do
+        psql -c "INSERT INTO etcd_nodes (endpoint) VALUES ('$e')"
+      done
+    fi
     # populate nodes table
     ( echo "BEGIN;"
       kubectl get nodes -l$NODE_FILTER -o wide --no-headers | awk '{print$1,$6}' | while read name ip; do echo "INSERT INTO nodes (ip,name) VALUES ('$ip','$name');"; done
@@ -241,35 +248,38 @@ data:
     done
     # output nodes yaml
     function fail1 {
-      echo "  - node: $1" >>/failures.yaml
-      echo "    error: $2" >>/failures.yaml
+      echo "- node: $1" >>/failures.yaml
+      echo "  error: $2" >>/failures.yaml
     }
     function fail2 {
-      echo "  - source: $1" >>/failures.yaml
-      echo "    destination: $2" >>/failures.yaml
-      echo "    error: $3" >>/failures.yaml
+      echo "- source: $1" >>/failures.yaml
+      echo "  destination: $2" >>/failures.yaml
+      echo "  error: $3" >>/failures.yaml
+    }
+    function fail3 {
+      echo "- error: $1" >>/failures.yaml
     }
     echo nodes: >/results.yaml
-    echo failures: >/failures.yaml
+    echo failures: >>/failures.yaml
     psql -t -A -F " " -c "SELECT ip, name, skew, swap_disabled, memory, cores, var_free, opt_free, kernel, encode(runtime::bytea,'base64'), encode(distro::bytea,'base64') FROM nodes ORDER BY ip" | while read ip name skew swap_disabled memory cores var_free opt_free kernel runtime distro; do
       cat <<EOF >>/results.yaml
-      - ip: $ip
-        name: $name
-        skew: $skew
-        swap_disabled: $swap_disabled
-        memory: $memory
-        cores: $cores
-        varFree: $var_free
-        optFree: $opt_free
-        kernel: $kernel
-        runtime: $(base64 -d <<<$runtime)
-        distro: $(base64 -d <<<$distro)
-        disks:
+    - ip: $ip
+      name: $name
+      skew: $skew
+      swap_disabled: $swap_disabled
+      memory: $memory
+      cores: $cores
+      varFree: $var_free
+      optFree: $opt_free
+      kernel: $kernel
+      runtime: $(base64 -d <<<$runtime)
+      distro: $(base64 -d <<<$distro)
+      disks:
     EOF
       psql -t -A -F " " -c "SELECT disks.file, disks.size FROM disks JOIN nodes ON nodes.id = disks.node_id WHERE nodes.ip = '$ip' ORDER BY disks.file" | while read file size; do
         cat <<EOF >>/results.yaml
-          - file: $file
-            size: $size
+      - file: $file
+        size: $size
     EOF
       done
       skew=$(echo $skew | sed s/-//)
@@ -280,32 +290,52 @@ data:
       [ $var_free -lt $MIN_VAR ] && fail1 $ip "/var free space ${var_free}MB is less than ${MIN_VAR}MB"
       [ $opt_free -lt $MIN_OPT ] && fail1 $ip "/opt free space ${opt_free}MB is less than ${MIN_OPT}MB"
     done
+    echo etcd_nodes: >>/results.yaml
+    psql -t -A -F " " -c "SELECT endpoint FROM etcd_nodes" | while read endpoint; do
+      cat <<EOF >>/results.yaml
+    - endpoint: $endpoint
+    EOF
+    done
+    echo etcd_conn: >>/results.yaml
+    psql -t -A -F " " -c "SELECT n.ip, e.endpoint, c.open FROM etcd_nodes e JOIN etcd_conn c ON c.etcd_id = e.id JOIN nodes n ON n.id = c.node_id" | while read ip endpoint open; do
+      cat <<EOF >>/results.yaml
+    - ip: $ip
+      endpoint: $endpoint
+      open: $open
+    EOF
+    [ $open != true ] && fail1 $ip "Cannot connect to etcd endpoint $endpoint"
+    done
+    # check etcd for old pwx install
+    if [ "$ETCD_ENDPOINTS" ]; then
+      etcd_output=$(ETCDCTL_API=3 etcdctl --endpoints $ETCD_ENDPOINTS get --prefix pwx --limit=1)
+      [ "$etcd_output" ] && fail3 "etcd contains existing pwx data"
+    fi
     echo latency: >>/results.yaml
     psql -t -A -F " " -c "SELECT source.ip, dest.ip, latency.time FROM latency JOIN nodes source ON source.id = latency.source_id JOIN nodes dest ON dest.id = latency.dest_id ORDER BY source.ip, dest.ip" | while read source dest latency; do
       cat <<EOF >>/results.yaml
-      - source: $source
-        dest: $dest
-        latency: $latency
+    - source: $source
+      dest: $dest
+      latency: $latency
     EOF
       [ $latency -gt $MAX_PING ] && fail2 $source $dest "Latency is ${latency}us which exceeds ${MAX_PING}us"
     done
     echo tcp: >>/results.yaml
     psql -t -A -F " " -c "SELECT source.ip, dest.ip, tcp.open, tcp.port FROM tcp JOIN nodes source ON source.id = tcp.source_id JOIN nodes dest ON dest.id = tcp.dest_id ORDER BY source.ip, dest.ip, tcp.port" | while read source dest open port; do
       cat <<EOF >>/results.yaml
-      - source: $source
-        dest: $dest
-        open: $open
-        port: $port
+    - source: $source
+      dest: $dest
+      open: $open
+      port: $port
     EOF
       [ $open = false ] && fail2 $source $dest "Cannot connect on TCP port $port"
     done
     echo udp: >>/results.yaml
     psql -t -A -F " " -c "SELECT source.ip, dest.ip, udp.open, udp.port FROM udp JOIN nodes source ON source.id = udp.source_id JOIN nodes dest ON dest.id = udp.dest_id ORDER BY source.ip, dest.ip, udp.port" | while read source dest open port; do
       cat <<EOF >>/results.yaml
-      - source: $source
-        dest: $dest
-        open: $open
-        port: $port
+    - source: $source
+      dest: $dest
+      open: $open
+      port: $port
     EOF
       [ $open = false ] && fail2 $source $dest "Cannot connect on UDP port $port"
     done
@@ -358,8 +388,14 @@ data:
         sql="$sql INSERT INTO tcp (source_id, dest_id, port, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM nodes WHERE ip = '$i'), $port, '$open');"
       done
     done
-    # FIXME populate etcd_nodes
-    # FIXME test etcd if external
+    # test etcd
+    endpoints=$(psql -t -A -c "SELECT endpoint FROM etcd_nodes")
+    for e in $endpoints; do
+      o=true
+      ETCDCTL_API=3 etcdctl --endpoints $e endpoint health --command-timeout 2s >&/dev/null
+      [ $? -ne 0 ] && o=false
+      sql="$sql INSERT INTO etcd_conn (node_id, etcd_id, open) VALUES ((SELECT id FROM nodes WHERE ip = '$ip'), (SELECT id FROM etcd_nodes WHERE endpoint = '$e'), '$o');";
+    done
     # FIXME test cloud creds
     sql="$sql UPDATE nodes SET complete = 'true' WHERE ip = '$ip';"
     psql <<<$sql
@@ -382,7 +418,7 @@ spec:
       containers:
       - name: initdb
         image: andrewh1978/px-preflight
-        imagePullPolicy: "IfNotPresent"
+        imagePullPolicy: "Always"
         command: [ "/bin/bash", "/initdb.sh" ]
         volumeMounts:
         - name: initdb
@@ -417,7 +453,7 @@ spec:
       containers:
       - name: one
         image: andrewh1978/px-preflight
-        imagePullPolicy: "IfNotPresent"
+        imagePullPolicy: "Always"
         command: [ "/bin/bash", "/one.sh" ]
         volumeMounts:
         - name: one
@@ -478,7 +514,7 @@ spec:
       containers:
         - name: many
           image: andrewh1978/px-preflight
-          imagePullPolicy: "IfNotPresent"
+          imagePullPolicy: "Always"
           command: [ "/bin/bash", "/many.sh" ]
           volumeMounts:
           - name: many
